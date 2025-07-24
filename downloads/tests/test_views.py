@@ -5,11 +5,10 @@ from django.contrib.auth import get_user_model
 from django.urls import reverse
 from django.test import TestCase, override_settings
 
-from rest_framework.authtoken.models import Token
 from rest_framework.test import APITestCase
 
 from .base import BaseDownloadTests, DownloadMixin
-from ..models import OS, Release
+from ..models import Release
 from pages.factories import PageFactory
 from pydotorg.drf import BaseAPITestCase
 from users.factories import UserFactory
@@ -39,6 +38,9 @@ class DownloadViewsTests(BaseDownloadTests):
         url = reverse('download:download_release_detail', kwargs={'release_slug': self.release_275.slug})
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
+
+        with self.subTest("Release file sizes should be human-readable"):
+            self.assertInHTML("<td>11.8&nbsp;MB</td>", response.content.decode())
 
         url = reverse('download:download_release_detail', kwargs={'release_slug': 'fake_slug'})
         response = self.client.get(url)
@@ -119,7 +121,7 @@ class BaseDownloadApiViewsTest(BaseDownloadTests, BaseAPITestCase):
         self.assertEqual(response.status_code, 401)
 
         url = self.create_url('os')
-        response = self.client.get(url, HTTP_AUTHORIZATION=self.Authorization_invalid)
+        response = self.client.get(url, headers={"authorization": self.Authorization_invalid})
         # TODO: API v1 returns 200 for a GET request even if token is invalid.
         # 'StaffAuthorization.read_list` returns 'object_list' unconditionally,
         # and 'StaffAuthorization.read_detail` returns 'True'.
@@ -219,7 +221,7 @@ class BaseDownloadApiViewsTest(BaseDownloadTests, BaseAPITestCase):
         self.assertEqual(len(content), 4)
 
         # Login to get all releases.
-        response = self.client.get(url, HTTP_AUTHORIZATION=self.Authorization)
+        response = self.client.get(url, headers={"authorization": self.Authorization})
         self.assertEqual(response.status_code, 200)
         content = self.get_json(response)
         self.assertEqual(len(content), 5)
@@ -255,7 +257,7 @@ class BaseDownloadApiViewsTest(BaseDownloadTests, BaseAPITestCase):
         response = self.client.get(new_url)
         # TODO: API v1 returns 401; and API v2 returns 404.
         self.assertIn(response.status_code, [401, 404])
-        response = self.client.get(new_url, HTTP_AUTHORIZATION=self.Authorization)
+        response = self.client.get(new_url, headers={"authorization": self.Authorization})
         self.assertEqual(response.status_code, 200)
         content = self.get_json(response)
         self.assertEqual(content['name'], data['name'])
@@ -487,15 +489,15 @@ class DownloadApiV2ViewsTest(BaseDownloadApiViewsTest, BaseDownloadTests, APITes
     )
     def test_throttling_user(self):
         url = self.create_url('os')
-        response = self.client.get(url, HTTP_AUTHORIZATION=self.Authorization)
+        response = self.client.get(url, headers={"authorization": self.Authorization})
         self.assertEqual(response.status_code, 200)
 
         # Second request should be okay for a user.
-        response = self.client.get(url, HTTP_AUTHORIZATION=self.Authorization)
+        response = self.client.get(url, headers={"authorization": self.Authorization})
         self.assertEqual(response.status_code, 200)
 
         # Third request should return '429 TOO MANY REQUESTS'.
-        response = self.client.get(url, HTTP_AUTHORIZATION=self.Authorization)
+        response = self.client.get(url, headers={"authorization": self.Authorization})
         self.assertEqual(response.status_code, 429)
 
     def test_filter_release_file_delete_by_release(self):
@@ -549,6 +551,48 @@ class DownloadApiV2ViewsTest(BaseDownloadApiViewsTest, BaseDownloadTests, APITes
                 'release_file/delete_by_release',
                 filters={'release': self.release_275.pk},
             ),
-            HTTP_AUTHORIZATION=self.Authorization,
+            headers={"authorization": self.Authorization}
         )
         self.assertEqual(response.status_code, 405)
+
+class ReleaseFeedTests(BaseDownloadTests):
+    """Tests for the downloads/feed.rss endpoint.
+
+    Content is ensured via setUp in BaseDownloadTests.
+    """
+
+    url = reverse("downloads:feed")
+
+
+    def test_endpoint_reachable(self) -> None:
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+
+    def test_feed_content(self) -> None:
+        """Ensure feed content is as expected.
+
+        Some things we want to check:
+         - Feed title, description, pubdate
+         - Feed items (releases) are in the correct order
+         - We get the expected number of releases (10)
+        """
+        response = self.client.get(self.url)
+        content = response.content.decode()
+
+        self.assertIn("Python 2.7.5", content)
+        self.assertIn("Python 3.10", content)
+        # Published but hidden show up in the API and thus the feed
+        self.assertIn("Python 0.0.0", content)
+
+        # No unpublished releases
+        self.assertNotIn("Python 9.7.2", content)
+
+        # Pre-releases are shown
+        self.assertIn("Python 3.9.90", content)
+
+    def test_feed_item_count(self) -> None:
+        response = self.client.get(self.url)
+        content = response.content.decode()
+
+        # In BaseDownloadTests, we create 5 releases, 4 of which are published, 1 of those published are hidden..
+        self.assertEqual(content.count("<item>"), 4)
